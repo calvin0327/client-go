@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"reflect"
+	"strconv"
 	"time"
 
 	"github.com/clusterpedia-io/client-go/fake/storage"
@@ -16,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/conversion"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -369,23 +372,97 @@ func (db *DataBase) UnionClusterNamespace(cluster, namespace string) []int {
 }
 
 func (db *DataBase) ListSimpleSearch(opts *internal.ListOptions) []*Resource {
+	if opts == nil {
+		return db.Table
+	}
 	var res []*Resource
 	var index []int
+	fmt.Println(opts.ClusterNames,opts.Namespaces)
 	for _, cluster := range opts.ClusterNames {
 		for _, namespace := range opts.Namespaces {
 			index = append(index, db.UnionClusterNamespace(cluster, namespace)...)
 		}
 	}
-	if ownerId := opts.OwnerUID; ownerId != "" {
-		for _, v := range index {
-			if string(db.Table[v].OwnerUID) == ownerId {
-				res = append(res, db.Table[v])
-			}
-		}
-		return res
-	}
+	fmt.Println(res,index)
 	for _, v := range index {
+		fmt.Println(res,db.Table[v],v)
 		res = append(res, db.Table[v])
 	}
-	return res
+	if opts.LabelSelector != nil {
+		fmt.Println(opts.LabelSelector,opts.LabelSelector.String())
+		fmt.Println(res)
+		tmp, err := db.LabelSelect(res, opts.LabelSelector)
+		if err != nil {
+			return nil
+		}
+		res = tmp
+	}
+	if ownerId := opts.OwnerUID; ownerId != "" {
+		for _, v := range res {
+			if string(v.OwnerUID) == ownerId {
+				res = append(res, v)
+			}
+		}
+	}
+	if opts.Limit > 0 {
+		fmt.Println(opts.Limit,opts.Continue,"====================================")
+		if opts.Limit > int64(len(res)) {
+			return res
+		}
+		fmt.Println(opts.Limit,opts.Continue,"====================================")
+		offset, err := strconv.Atoi(opts.Continue)
+		if err != nil {
+			offset = 0
+		}
+		if offset < 0 {
+			return nil
+		}
+		start := int64(offset-1)*(opts.Limit)
+		end := int64(offset)*opts.Limit
+		if start > int64(len(res)) {
+			return nil
+		}else if end > int64(len(res)) {
+			return res[start:]
+		}else {
+			return res[int64(offset)*(opts.Limit):int64(offset+1)*opts.Limit]
+		}
+	}else {
+		return res
+	}
+}
+
+func (db *DataBase) LabelSelect(list []*Resource, s labels.Selector) ([]*Resource, error) {
+	var res []*Resource
+	r, _ := s.Requirements()
+	for _, v := range list {
+		s2, err := v.Object.MarshalJSON()
+		if err != nil {
+			fmt.Println("v.Object.MarshalJSON()",err)
+			return nil, err
+		}
+		var m map[string]interface{}
+		err = json.Unmarshal(s2, &m)
+		if err != nil {
+			fmt.Println("json.Unmarshal(s2, m)",err)
+			return nil, err
+		}
+		maps,ok := m["metadata"].(map[string]interface{})["labels"]
+		if ok {
+			sl := maps.(map[string]interface{})
+			for key, value := range sl {
+				for _,requirement := range r {
+					if key == requirement.Key() {
+						for index,_ := range requirement.Values(){
+							if value == index {
+								res = append(res,v)
+								continue
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	fmt.Println(res)
+	return res, nil
 }
